@@ -10,6 +10,7 @@ if (!DELETION_ENABLED) {
 }
 
 const { result: rules } = await getZeroTrustRules();
+// Match all tier-based rules + legacy rules
 const cgpsRules = rules.filter(({ name }) => name.startsWith("CGPS Filter Lists"));
 
 (async () => {

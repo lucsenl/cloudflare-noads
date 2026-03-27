@@ -1,0 +1,22 @@
+{
+  "core": {
+    "blocklist_urls": [
+      "https://small.oisd.nl/",
+      "https://adaway.org/hosts.txt"
+    ],
+    "allowlist_urls": [],
+    "location_ids": []
+  },
+  "lite": {
+    "blocklist_urls": [],
+    "allowlist_urls": [],
+    "location_ids": ["605d364dadee4b09a80fc294f038bcbf", "11c9874cbfbc468ead01b4297a74da8a"]
+  },
+  "pro": {
+    "blocklist_urls": [
+      "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/domains/light.txt"
+    ],
+    "allowlist_urls": [],
+    "location_ids": ["005c1b21f5b04c27aceab2146db90743", "318b5ce939f7441ebab6156abb4a914c", "ade99546f7294da180c7a531d4f98d6f", "6058e778da444f56982b840236410bb6"]
+  }
+}

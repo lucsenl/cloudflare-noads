@@ -3,24 +3,27 @@ import { unlink } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import {
-  LIST_TYPE,
   PROCESSING_FILENAME,
-  RECOMMENDED_ALLOWLIST_URLS,
-  RECOMMENDED_BLOCKLIST_URLS,
   USER_DEFINED_ALLOWLIST_URLS,
-  USER_DEFINED_BLOCKLIST_URLS,
+  TIERS,
+  TIER_NAMES,
+  getTierBlocklistFilename,
+  getTierAllowlistFilename,
 } from "./lib/constants.js";
 import { downloadFiles } from "./lib/utils.js";
 
-const allowlistUrls = USER_DEFINED_ALLOWLIST_URLS || RECOMMENDED_ALLOWLIST_URLS;
-const blocklistUrls = USER_DEFINED_BLOCKLIST_URLS || RECOMMENDED_BLOCKLIST_URLS;
-const listType = process.argv[2];
+const allowlistUrls = USER_DEFINED_ALLOWLIST_URLS;
 
-const downloadLists = async (filename, urls) => {
+const downloadList = async (filename, urls) => {
   const filePath = resolve(`./${filename}`);
 
   if (existsSync(filePath)) {
     await unlink(filePath);
+  }
+
+  if (!urls || urls.length === 0) {
+    console.log(`No URLs configured for ${filename}, skipping.`);
+    return;
   }
 
   try {
@@ -42,18 +45,27 @@ const downloadLists = async (filename, urls) => {
   }
 };
 
-switch (listType) {
-  case LIST_TYPE.ALLOWLIST: {
-    await downloadLists(PROCESSING_FILENAME.ALLOWLIST, allowlistUrls);
-    break;
+// Download shared allowlist
+console.log("Downloading shared allowlist...");
+await downloadList(PROCESSING_FILENAME.ALLOWLIST, allowlistUrls);
+
+// Download blocklists and allowlists per tier
+for (const tier of TIER_NAMES) {
+  const tierConfig = TIERS[tier];
+
+  // Blocklist
+  const blockFilename = getTierBlocklistFilename(tier);
+  if (tierConfig.blocklist_urls && tierConfig.blocklist_urls.length > 0) {
+    console.log(`\nDownloading blocklist for tier "${tier}"...`);
+    await downloadList(blockFilename, tierConfig.blocklist_urls);
+  } else {
+    console.log(`\nNo blocklist URLs for tier "${tier}", skipping.`);
   }
-  case LIST_TYPE.BLOCKLIST: {
-    await downloadLists(PROCESSING_FILENAME.BLOCKLIST, blocklistUrls);
-    break;
+
+  // Per-tier allowlist
+  const allowFilename = getTierAllowlistFilename(tier);
+  if (tierConfig.allowlist_urls && tierConfig.allowlist_urls.length > 0) {
+    console.log(`Downloading allowlist for tier "${tier}"...`);
+    await downloadList(allowFilename, tierConfig.allowlist_urls);
   }
-  default:
-    await Promise.all([
-      downloadLists(PROCESSING_FILENAME.ALLOWLIST, allowlistUrls),
-      downloadLists(PROCESSING_FILENAME.BLOCKLIST, blocklistUrls),
-    ]);
 }

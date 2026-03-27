@@ -4,108 +4,184 @@
 
 Cloudflare Gateway allows you to create custom rules to filter HTTP, DNS, and network traffic based on your firewall policies. This is a collection of scripts that can be used to get a similar experience as if you were using Pi-hole, but with Cloudflare Gateway - so no servers to maintain or need to buy a Raspberry Pi!
 
-## About the individual scripts
+## Tier System
 
-- `cf_list_delete.js` - Deletes all lists created by CGPS from Cloudflare Gateway. This is useful for subsequent runs.
-- `cf_list_create.js` - Takes a blocklist.txt file containing domains and creates lists in Cloudflare Gateway
-- `cf_gateway_rule_create.js` - Creates a Cloudflare Gateway rule to block all traffic if it matches the lists created by CGPS.
-- `cf_gateway_rule_delete.js` - Deletes the Cloudflare Gateway rule created by CGPS. Useful for subsequent runs.
-- `download_lists.js` - Initiates blocklist and whitelist download.
+CGPS uses a **tier hierarchy** with three fixed tiers — **Core**, **Lite** and **Pro** — that lets you apply different blocklists/allowlists to different Cloudflare Gateway DNS locations.
 
-## Features
+| Tier | Scope | Location filter |
+|------|-------|-----------------|
+| **Core** | Applies to **all** locations (no location filter) | — |
+| **Lite** | Applies only to the locations you specify | `dns.location in {"uuid1" "uuid2"}` |
+| **Pro** | Applies only to the locations you specify | `dns.location in {"uuid1" "uuid2"}` |
 
-- Support for basic hosts files
-- Full support for domain lists
-- Automatically cleans up filter lists: removes duplicates, invalid domains, comments and more
-- Works **fully unattended**
-- **Allowlist support**, allowing you to prevent false positives and breakage by forcing trusted domains to always be unblocked.
-- Experimental **SNI-based filtering** that works independently of DNS settings, preventing unauthorized or malicious DNS changes from bypassing the filter.
-- Optional health check: Sends a ping request ensuring continuous monitoring and alerting for the workflow execution, or messages a Discord webhook with progress.
+### How it works
+
+1. **Download** — `download_lists.js` fetches the blocklist and allowlist URLs configured for each tier.
+2. **Create lists** — `cf_list_create.js` processes domains per tier, deduplicates, and uploads them to Cloudflare Gateway as Zero Trust lists.
+3. **Create rules** — `cf_gateway_rule_create.js` creates a DNS gateway rule for each tier. Core has no location filter (applies everywhere); Lite and Pro rules use `dns.location in {…}` to target specific locations.
+
+### Deduplication
+
+Domains present in the **Core** tier are automatically removed from Lite and Pro lists. This avoids wasting the 300k domain limit with duplicates across tiers.
+
+## Environment Variables
+
+All configuration is done via environment variables (`.env` for local, GitHub Actions secrets/variables for CI).
+
+### Required
+
+| Variable | Description |
+|----------|-------------|
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API Token with Zero Trust read and edit permissions |
+| `CLOUDFLARE_ACCOUNT_ID` | Your Cloudflare account ID |
+
+### Tier configuration
+
+Each tier reads three environment variables. URLs and IDs are **separated by newlines**.
+
+| Variable | Description |
+|----------|-------------|
+| `CORE_BLOCKLIST_URLS` | Blocklist URLs for the Core tier |
+| `CORE_ALLOWLIST_URLS` | Allowlist URLs for the Core tier (optional) |
+| `CORE_LOCATION_IDS` | Location IDs for Core (optional — if empty, rule applies to all locations) |
+| `LITE_BLOCKLIST_URLS` | Blocklist URLs for the Lite tier |
+| `LITE_ALLOWLIST_URLS` | Allowlist URLs for the Lite tier (optional) |
+| `LITE_LOCATION_IDS` | Location IDs for the Lite tier |
+| `PRO_BLOCKLIST_URLS` | Blocklist URLs for the Pro tier |
+| `PRO_ALLOWLIST_URLS` | Allowlist URLs for the Pro tier (optional) |
+| `PRO_LOCATION_IDS` | Location IDs for the Pro tier |
+
+### Shared allowlist
+
+| Variable | Description |
+|----------|-------------|
+| `ALLOWLIST_URLS` | Shared allowlist URLs applied to **all** tiers. Per-tier allowlists are additive on top of this. |
+
+### Optional
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CLOUDFLARE_LIST_ITEM_LIMIT` | Max domains allowed across all tiers (free plan = 300 000) | `300000` |
+| `BLOCK_PAGE_ENABLED` | Show a block page when a domain is blocked (`1` to enable) | `0` |
+| `BLOCK_BASED_ON_SNI` | Enable experimental SNI-based filtering (`1` to enable) | `0` |
+| `DRY_RUN` | Simulate changes without modifying Cloudflare (`1` to enable) | `0` |
+| `DISCORD_WEBHOOK_URL` | Discord webhook URL for notifications | — |
+| `PING_URL` | HTTP(S) URL to ping after a successful run | — |
+| `DEBUG` | Enable debug logging (`1` to enable) | `0` |
+
+### Example `.env`
+
+```env
+CLOUDFLARE_API_TOKEN=your_api_token
+CLOUDFLARE_ACCOUNT_ID=your_account_id
+
+ALLOWLIST_URLS=https://example.com/shared-allowlist.txt
+
+CORE_BLOCKLIST_URLS=https://big.oisd.nl/domainswild2
+https://adaway.org/hosts.txt
+CORE_ALLOWLIST_URLS=https://example.com/core-allowlist.txt
+
+LITE_BLOCKLIST_URLS=https://example.com/lite-blocklist.txt
+LITE_LOCATION_IDS=605d364dadee4b09a80fc294f038bcbf
+11c9874cbfbc468ead01b4297a74da8a
+
+PRO_BLOCKLIST_URLS=https://example.com/pro-blocklist.txt
+PRO_LOCATION_IDS=005c1b21f5b04c27aceab2146db90743
+318b5ce939f7441ebab6156abb4a914c
+```
+
+## Scripts
+
+| Script | Description |
+|--------|-------------|
+| `download_lists.js` | Downloads blocklists and allowlists for all tiers |
+| `cf_list_create.js` | Processes domains per tier and syncs Zero Trust lists to Cloudflare |
+| `cf_gateway_rule_create.js` | Creates DNS gateway rules per tier with location filtering |
+| `cf_list_delete.js` | Deletes all CGPS lists from Cloudflare Gateway |
+| `cf_gateway_rule_delete.js` | Deletes all CGPS gateway rules |
+| `cf_defragment.js` | Defragments lists per tier (compacts sparse lists) |
+
+### npm commands
+
+```bash
+npm start              # Download lists + create lists + create rules (full run)
+npm run download       # Download blocklists and allowlists only
+npm run cloudflare-create       # Create lists + rules
+npm run cloudflare-create:list  # Create lists only
+npm run cloudflare-create:rule  # Create rules only
+npm run cloudflare-delete       # Delete rules + lists
+npm run cloudflare-delete:list  # Delete lists only
+npm run cloudflare-delete:rule  # Delete rules only
+npm run cloudflare-defragment   # Defragment lists
+npm run dry            # Dry run (download + simulate list creation)
+```
 
 ## Usage
 
 ### Prerequisites
 
-1. Node.js installed on your machine
-2. Cloudflare [Zero Trust](https://one.dash.cloudflare.com/) account - the Free plan is enough. Use the Cloudflare [documentation](https://developers.cloudflare.com/cloudflare-one/) for details.
-3. Cloudflare email, API **token** with Zero Trust read and edit permissions, and account ID. See [here](https://github.com/mrrfv/cloudflare-gateway-pihole-scripts/blob/main/extended_guide.md#cloudflare_api_token) for more information about how to create the token.
-4. A file containing the domains you want to block - **max 300,000 domains for the free plan** - in the working directory named `blocklist.txt`. Mullvad provides awesome [DNS blocklists](https://github.com/mullvad/dns-blocklists) that work well with this project. A script that downloads recommended blocklists, `download_lists.js`, is included.
-5. Optional: You can whitelist domains by putting them in a file `allowlist.txt`. You can also use the `get_recomended_whitelist.sh` Bash script to get the recommended whitelists.
-6. Optional: A Discord (or similar) webhook URL to send notifications to.
+1. Node.js 24+ installed on your machine
+2. A Cloudflare [Zero Trust](https://one.dash.cloudflare.com/) account (the free plan is enough)
+3. A Cloudflare API **Token** with Zero Trust read and edit permissions, and your account ID
+4. One or more DNS locations configured in Zero Trust (Networks → DNS locations) — collect their UUIDs for the tier configuration
 
 ### Running locally
 
 1. Clone this repository.
 2. Run `npm install` to install dependencies.
-3. Copy `.env.example` to `.env` and fill in the values.
-4. If you haven't downloaded any filters yourself, run the `node download_lists.js` command to download recommended filter lists (OISD Small and AdAway; about 50 000 domains).
-5. Run `node cf_list_create.js` to create the lists in Cloudflare Gateway. This will take a while.
-6. Run `node cf_gateway_rule_create.js` to create the firewall rule in Cloudflare Gateway.
-7. Profit! Time is money after all. You can update the lists by repeating steps 4, 5 and 6.
+3. Copy `.env.example` to `.env` and fill in the variables (see [Environment Variables](#environment-variables)).
+4. Run `npm start` to download lists, create Cloudflare Gateway lists, and create rules — all in one step.
+
+To update your filters later, just run `npm start` again.
 
 ### Running in GitHub Actions
 
-These scripts can be run using GitHub Actions so your filters will be automatically updated and pushed to Cloudflare Gateway. This is useful if you are using a frequently updated blocklist.
+The workflow at `.github/workflows/update-filters.yml` automates everything. It runs weekly (Monday 3 AM UTC), on push to `main`, or via manual dispatch.
 
-Please note that:
-- GitHub Actions wasn't intended to be used for this purpose, therefore the local options are recommended.
-- the GitHub Action downloads the recommended blocklists and whitelist by default. You can change this behavior by setting Actions variables.
+1. Create a **private** repository and copy the project files.
+2. Add the following **secrets** in your repository settings (Settings → Secrets and variables → Actions):
 
-1. Create a new empty, private repository. Forking or public repositories are discouraged, but supported - although the script never leaks your API keys and GitHub Actions secrets are automatically redacted from the logs, it's better to be safe than sorry. There is **no need to use the "Sync fork" button** if you're doing that! The GitHub Action downloads the latest code regardless of what's in your forked repository.
-2. Create the following GitHub Actions secrets in your repository settings:
-   - `CLOUDFLARE_API_TOKEN`: Your Cloudflare API Token with Zero Trust read and edit permissions
-   - `CLOUDFLARE_ACCOUNT_ID`: Your Cloudflare account ID
-   - `CLOUDFLARE_LIST_ITEM_LIMIT`: The maximum number of blocked domains allowed for your Cloudflare Zero Trust plan. Default to 300,000. Optional if you are using the free plan.
-   - `PING_URL`: /Optional/ The HTTP(S) URL to ping (using curl) after the GitHub Action has successfully updated your filters. Useful for monitoring.
-   - `DISCORD_WEBHOOK_URL`: /Optional/ The Discord (or similar) webhook URL to send notifications to. Good for monitoring as well.
-3. Create the following GitHub Actions variables in your repository settings if you desire:
-   - `ALLOWLIST_URLS`: Uses your own allowlists. One URL per line. Recommended allowlists will be used if this variable is not provided.
-   - `BLOCKLIST_URLS`: Uses your own blocklists. One URL per line. Recommended blocklists will be used if this variable is not provided.
-   - `BLOCK_PAGE_ENABLED`: Enable showing block page if host is blocked.
-4. Create a new file in the repository named `.github/workflows/main.yml` with the contents of `auto_update_github_action.yml` found in this repository. The default settings will update your filters every week at 3 AM UTC. You can change this by editing the `schedule` property.
-5. Enable GitHub Actions in your repository settings.
+   | Secret | Required |
+   |--------|----------|
+   | `CLOUDFLARE_API_TOKEN` | Yes |
+   | `CLOUDFLARE_ACCOUNT_ID` | Yes |
+   | `CLOUDFLARE_LIST_ITEM_LIMIT` | No (defaults to 300 000) |
+   | `DISCORD_WEBHOOK_URL` | No |
+   | `PING_URL` | No |
+
+3. Add the following **variables** (Settings → Secrets and variables → Actions → Variables tab):
+
+   | Variable | Description |
+   |----------|-------------|
+   | `ALLOWLIST_URLS` | Shared allowlist URLs (one per line) |
+   | `CORE_BLOCKLIST_URLS` | Core tier blocklist URLs (one per line) |
+   | `CORE_ALLOWLIST_URLS` | Core tier allowlist URLs (one per line) |
+   | `CORE_LOCATION_IDS` | Core location IDs (one per line, optional) |
+   | `LITE_BLOCKLIST_URLS` | Lite tier blocklist URLs (one per line) |
+   | `LITE_ALLOWLIST_URLS` | Lite tier allowlist URLs (one per line) |
+   | `LITE_LOCATION_IDS` | Lite tier location IDs (one per line) |
+   | `PRO_BLOCKLIST_URLS` | Pro tier blocklist URLs (one per line) |
+   | `PRO_ALLOWLIST_URLS` | Pro tier allowlist URLs (one per line) |
+   | `PRO_LOCATION_IDS` | Pro tier location IDs (one per line) |
+   | `BLOCK_PAGE_ENABLED` | Set to `1` to enable block page |
+
+4. Enable GitHub Actions in the repository and trigger the workflow manually to test.
 
 ### DNS setup for Cloudflare Gateway
 
-1. Go to your Cloudflare Zero Trust dashboard, and navigate to Networks -> Resolvers & Proxies -> DNS locations.
-2. Click on the default location or create one if it doesn't exist.
-3. Configure your router or device based on the provided DNS addresses.
+1. Go to your Cloudflare Zero Trust dashboard → Networks → DNS locations.
+2. Create locations (or use existing ones) and note their **UUIDs** — these are the IDs you will use in `LITE_LOCATION_IDS` / `PRO_LOCATION_IDS`.
+3. Configure your router or device to use the DNS addresses provided for each location.
 
-Alternatively, you can install the Cloudflare WARP client and log in to Zero Trust. This method proxies your traffic over Cloudflare servers, meaning it works similarly to a commercial VPN. You need to do this if you want to use the SNI-based filtering feature, as it requires Cloudflare to inspect your raw traffic (HTTPS remains encrypted if "TLS decryption" is disabled).
-
-### Malware blocking
-
-The default filter lists are only optimized for ad & tracker blocking because Cloudflare Zero Trust itself comes with much more advanced security features. It's recommended that you create your own Cloudflare Gateway firewall policies that leverage those features on top of CGPS.
+Alternatively, install the Cloudflare WARP client and log in to Zero Trust.
 
 ### Dry runs
 
-To see if e.g. your filter lists are valid without actually changing anything in your Cloudflare account, you can set the `DRY_RUN` environment variable to 1, either in `.env` or the regular way. This will only print info such as the lists that would be created or the amount of duplicate domains to the console.
+Set `DRY_RUN=1` in your `.env` to simulate list creation without modifying anything in Cloudflare.
 
-**Warning:** This currently only works for `cf_list_create.js`.
-
-<!-- markdownlint-disable-next-line MD026 -->
-## Why not...
-
-### Pi-hole or Adguard Home?
-
-- Complex setup to get it working outside your home
-- Requires a Raspberry Pi
-
-### NextDNS?
-
-- DNS filtering is disabled after 300,000 queries per month on the free plan
-
-### Cloudflare Gateway?
-
-- Requires a valid payment card or PayPal account
-- Limit of 300k domains on the free plan
-
-### a hosts file?
-
-- Potential performance issues, especially on [Windows](https://github.com/StevenBlack/hosts/issues/93)
-- No filter updates
-- Doesn't work for your mobile device
-- No statistics on how many domains you've blocked
+```bash
+npm run dry
+```
 
 ## License
 

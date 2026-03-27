@@ -2,7 +2,7 @@ import {
   deleteZeroTrustListsOneByOne,
   getZeroTrustLists,
 } from "./lib/api.js";
-import { DELETION_ENABLED } from "./lib/constants.js";
+import { DELETION_ENABLED, TIER_NAMES, getTierListPrefix } from "./lib/constants.js";
 import { notifyWebhook } from "./lib/utils.js";
 
 if (!DELETION_ENABLED) {
@@ -22,7 +22,15 @@ if (!DELETION_ENABLED) {
     return;
   }
 
-  const cgpsLists = lists.filter(({ name }) => name.startsWith("CGPS List"));
+  // Match lists from all tiers + legacy "CGPS List" prefix
+  const prefixes = [
+    ...TIER_NAMES.map(getTierListPrefix),
+    "CGPS List", // legacy prefix for backward compatibility
+  ];
+
+  const cgpsLists = lists.filter(({ name }) =>
+    prefixes.some((prefix) => name.startsWith(prefix))
+  );
 
   if (!cgpsLists.length) {
     console.warn(

@@ -8,6 +8,11 @@ import {
   LIST_ITEM_LIMIT,
   LIST_ITEM_SIZE,
   PROCESSING_FILENAME,
+  TIERS,
+  TIER_NAMES,
+  getTierBlocklistFilename,
+  getTierAllowlistFilename,
+  getTierListPrefix,
 } from "./lib/constants.js";
 import { normalizeDomain } from "./lib/helpers.js";
 import {
@@ -19,136 +24,203 @@ import {
   readFile,
 } from "./lib/utils.js";
 
+const memoizedNormalizeDomain = memoize(normalizeDomain);
+
+// Determine allowlist filename
 const allowlistFilename = existsSync(PROCESSING_FILENAME.OLD_ALLOWLIST)
   ? PROCESSING_FILENAME.OLD_ALLOWLIST
   : PROCESSING_FILENAME.ALLOWLIST;
-const blocklistFilename = existsSync(PROCESSING_FILENAME.OLD_BLOCKLIST)
-  ? PROCESSING_FILENAME.OLD_BLOCKLIST
-  : PROCESSING_FILENAME.BLOCKLIST;
-const allowlist = new Map();
-const blocklist = new Map();
-const domains = [];
-let processedDomainCount = 0;
-let unnecessaryDomainCount = 0;
-let duplicateDomainCount = 0;
-let allowedDomainCount = 0;
-const memoizedNormalizeDomain = memoize(normalizeDomain);
 
-// Check if the blocklist.txt and allowlist.txt files exist
-for (const filename of [allowlistFilename, blocklistFilename]) {
-  if (!existsSync(filename)) {
-    console.error(`File not found: ${filename}. Please create a block/allowlist first, or run download_lists.js to download the recommended lists.`);
-    process.exit(1);
-  }
+// Read shared allowlist (optional - may not exist if no ALLOWLIST_URLS configured)
+const allowlist = new Map();
+if (existsSync(allowlistFilename)) {
+  console.log(`Processing shared allowlist: ${allowlistFilename}`);
+  await readFile(resolve(`./${allowlistFilename}`), (line) => {
+    const _line = line.trim();
+    if (!_line) return;
+    if (isComment(_line)) return;
+    const domain = memoizedNormalizeDomain(_line, true);
+    if (!isValidDomain(domain)) return;
+    allowlist.set(domain, 1);
+  });
+  console.log(`Loaded ${allowlist.size} allowlisted domains.\n`);
+} else {
+  console.log("No shared allowlist found, proceeding without one.\n");
 }
 
-// Read allowlist
-console.log(`Processing ${allowlistFilename}`);
-await readFile(resolve(`./${allowlistFilename}`), (line) => {
-  const _line = line.trim();
+// Track global domain count across all tiers (shared LIST_ITEM_LIMIT)
+let globalDomainCount = 0;
 
-  if (!_line) return;
+// Core domains set - used to deduplicate other tiers
+const coreDomains = new Set();
 
-  if (isComment(_line)) return;
+// Process each tier
+const tierResults = {};
 
-  const domain = memoizedNormalizeDomain(_line, true);
+for (const tier of TIER_NAMES) {
+  const blocklistFilename = getTierBlocklistFilename(tier);
+  const prefix = getTierListPrefix(tier);
 
-  if (!isValidDomain(domain)) return;
-
-  allowlist.set(domain, 1);
-});
-
-// Read blocklist
-console.log(`Processing ${blocklistFilename}`);
-await readFile(resolve(`./${blocklistFilename}`), (line, rl) => {
-  if (domains.length === LIST_ITEM_LIMIT) {
-    return;
+  if (!existsSync(blocklistFilename)) {
+    console.log(
+      `Blocklist file not found for tier "${tier}": ${blocklistFilename} - Skipping.`
+    );
+    continue;
   }
 
-  const _line = line.trim();
+  console.log(`\n=== Processing tier: ${tier.toUpperCase()} ===`);
+  console.log(`Blocklist file: ${blocklistFilename}`);
+  console.log(`List prefix: ${prefix}`);
 
-  if (!_line) return;
-
-  // Check if the current line is a comment in any format
-  if (isComment(_line)) return;
-
-  // Remove prefixes and suffixes in hosts, wildcard or adblock format
-  const domain = memoizedNormalizeDomain(_line);
-
-  // Check if it is a valid domain which is not a URL or does not contain
-  // characters like * in the middle of the domain
-  if (!isValidDomain(domain)) return;
-
-  processedDomainCount++;
-
-  if (allowlist.has(domain)) {
-    if (DEBUG) console.log(`Found ${domain} in allowlist - Skipping`);
-    allowedDomainCount++;
-    return;
+  // Build tier-specific allowlist = shared + per-tier
+  const tierAllowlist = new Map(allowlist);
+  const tierAllowlistFilename = getTierAllowlistFilename(tier);
+  if (existsSync(tierAllowlistFilename)) {
+    console.log(`Loading per-tier allowlist: ${tierAllowlistFilename}`);
+    await readFile(resolve(`./${tierAllowlistFilename}`), (line) => {
+      const _line = line.trim();
+      if (!_line) return;
+      if (isComment(_line)) return;
+      const domain = memoizedNormalizeDomain(_line, true);
+      if (!isValidDomain(domain)) return;
+      tierAllowlist.set(domain, 1);
+    });
+    console.log(`Tier "${tier}" allowlist: ${tierAllowlist.size} domains (shared: ${allowlist.size}, tier-specific: ${tierAllowlist.size - allowlist.size})`);
   }
 
-  if (blocklist.has(domain)) {
-    if (DEBUG) console.log(`Found ${domain} in blocklist already - Skipping`);
-    duplicateDomainCount++;
-    return;
+  const blocklist = new Map();
+  const domains = [];
+  let processedDomainCount = 0;
+  let unnecessaryDomainCount = 0;
+  let duplicateDomainCount = 0;
+  let allowedDomainCount = 0;
+  let deduplicatedFromCoreCount = 0;
+
+  const remainingLimit = LIST_ITEM_LIMIT - globalDomainCount;
+  if (remainingLimit <= 0) {
+    console.log(
+      `Global domain limit reached (${LIST_ITEM_LIMIT}). Skipping tier "${tier}".`
+    );
+    continue;
   }
 
-  // Get all the levels of the domain and check from the highest
-  // because we are blocking all subdomains
-  // Example: fourth.third.example.com => ["example.com", "third.example.com", "fourth.third.example.com"]
-  for (const item of extractDomain(domain).slice(1)) {
-    // Check for any higher level domain matches in the allowlist
-    if (allowlist.has(item)) {
-      if (DEBUG) console.log(`Found parent domain ${item} in allowlist - Skipping ${domain}`);
+  await readFile(resolve(`./${blocklistFilename}`), (line, rl) => {
+    if (domains.length >= remainingLimit) {
+      return;
+    }
+
+    const _line = line.trim();
+    if (!_line) return;
+    if (isComment(_line)) return;
+
+    const domain = memoizedNormalizeDomain(_line);
+    if (!isValidDomain(domain)) return;
+
+    processedDomainCount++;
+
+    if (tierAllowlist.has(domain)) {
+      if (DEBUG) console.log(`Found ${domain} in allowlist - Skipping`);
       allowedDomainCount++;
       return;
     }
 
-    if (!blocklist.has(item)) continue;
+    // For non-core tiers, skip domains already in core (they're blocked for everyone)
+    if (tier !== "core" && coreDomains.has(domain)) {
+      if (DEBUG)
+        console.log(
+          `Found ${domain} in core blocklist - Skipping (already blocked for everyone)`
+        );
+      deduplicatedFromCoreCount++;
+      return;
+    }
 
-    // The higher-level domain is already blocked
-    // so it's not necessary to block this domain
-    if (DEBUG) console.log(`Found ${item} in blocklist already - Skipping ${domain}`);
-    unnecessaryDomainCount++;
-    return;
+    if (blocklist.has(domain)) {
+      if (DEBUG) console.log(`Found ${domain} in blocklist already - Skipping`);
+      duplicateDomainCount++;
+      return;
+    }
+
+    for (const item of extractDomain(domain).slice(1)) {
+      if (tierAllowlist.has(item)) {
+        if (DEBUG)
+          console.log(
+            `Found parent domain ${item} in allowlist - Skipping ${domain}`
+          );
+        allowedDomainCount++;
+        return;
+      }
+
+      if (!blocklist.has(item)) continue;
+
+      if (DEBUG)
+        console.log(`Found ${item} in blocklist already - Skipping ${domain}`);
+      unnecessaryDomainCount++;
+      return;
+    }
+
+    blocklist.set(domain, 1);
+    domains.push(domain);
+
+    if (domains.length >= remainingLimit) {
+      console.log(
+        `Maximum number of blocked domains reached for tier "${tier}" - Stopping...`
+      );
+      rl.close();
+    }
+  });
+
+  // If this is core, save domains for deduplication against other tiers
+  if (tier === "core") {
+    domains.forEach((d) => coreDomains.add(d));
   }
 
-  blocklist.set(domain, 1);
-  domains.push(domain);
+  globalDomainCount += domains.length;
+  const numberOfLists = Math.ceil(domains.length / LIST_ITEM_SIZE);
 
-  if (domains.length === LIST_ITEM_LIMIT) {
-    console.log(
-      "Maximum number of blocked domains reached - Stopping processing blocklist..."
-    );
-    rl.close();
+  console.log(`\nTier "${tier}" statistics:`);
+  console.log(`  Processed domains: ${processedDomainCount}`);
+  console.log(`  Duplicate domains: ${duplicateDomainCount}`);
+  console.log(`  Unnecessary domains: ${unnecessaryDomainCount}`);
+  console.log(`  Allowed domains: ${allowedDomainCount}`);
+  if (tier !== "core") {
+    console.log(`  Deduplicated from core: ${deduplicatedFromCoreCount}`);
   }
-});
+  console.log(`  Blocked domains: ${domains.length}`);
+  console.log(`  Lists to create/sync: ${numberOfLists}`);
 
-const numberOfLists = Math.ceil(domains.length / LIST_ITEM_SIZE);
+  tierResults[tier] = { domains, prefix, numberOfLists };
+}
 
-console.log("\n\n");
-console.log(`Number of processed domains: ${processedDomainCount}`);
-console.log(`Number of duplicate domains: ${duplicateDomainCount}`);
-console.log(`Number of unnecessary domains: ${unnecessaryDomainCount}`);
-console.log(`Number of allowed domains: ${allowedDomainCount}`);
-console.log(`Number of blocked domains: ${domains.length}`);
-console.log(`Number of lists to be created: ${numberOfLists}`);
-console.log("\n\n");
+console.log(`\n=== Total domains across all tiers: ${globalDomainCount} ===\n`);
 
 (async () => {
   if (DRY_RUN) {
     console.log(
-      "Dry run complete - no lists were created. If this was not intended, please remove the DRY_RUN environment variable and try again."
+      "Dry run complete - no lists were created. Remove DRY_RUN env var to proceed."
     );
     return;
   }
 
-  console.log(
-    `Creating ${numberOfLists} lists for ${domains.length} domains...`
-  );
+  for (const [tier, { domains, prefix, numberOfLists }] of Object.entries(
+    tierResults
+  )) {
+    if (domains.length === 0) {
+      console.log(`No domains for tier "${tier}" - Skipping list creation.`);
+      continue;
+    }
 
-  await synchronizeZeroTrustLists(domains);
-  await notifyWebhook(
-    `CF List Create script finished running (${domains.length} domains, ${numberOfLists} lists)`
-  );
+    console.log(
+      `\nSyncing ${numberOfLists} lists for tier "${tier}" (${domains.length} domains, prefix: "${prefix}")...`
+    );
+    await synchronizeZeroTrustLists(domains, prefix);
+  }
+
+  const summary = Object.entries(tierResults)
+    .map(
+      ([tier, { domains, numberOfLists }]) =>
+        `${tier}: ${domains.length} domains / ${numberOfLists} lists`
+    )
+    .join("; ");
+
+  await notifyWebhook(`CF List Create finished (${summary})`);
 })();
